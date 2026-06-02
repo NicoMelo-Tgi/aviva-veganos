@@ -1,271 +1,112 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>Aviva Veganos — ¿Es realmente vegano?</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Hanken+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
-<style>
-  :root{
-    --cream:#F6F1E7; --paper:#FCFAF4; --ink:#1E2B22; --forest:#2F4A3A;
-    --leaf:#5C8A5A; --sage:#A9C0A2; --line:#E2DBCB; --ochre:#C28A2C;
-    --terra:#B0533C; --muted:#6E7A6E;
-    --display:'Fraunces',Georgia,serif; --body:'Hanken Grotesk',system-ui,sans-serif;
+// Aviva Veganos — backend proxy. The Anthropic API key lives ONLY here (env var),
+// never in the front-end. The client sends an action; the server builds the prompt,
+// calls Anthropic, parses the JSON and returns a clean result.
+
+const MODEL = "claude-sonnet-4-20250514";
+
+const RULES = `Reglas estrictas:
+- VEGANO = sin ingredientes de origen animal. Flagueá si aparece: carmín / CI 75470 / ácido carmínico, lanolina, cera de abeja (cera alba / beeswax), miel (mel), propóleo, colágeno animal, keratina/keratin (salvo que aclare "vegetal"), elastina, escualeno/escualano de origen animal, goma laca / shellac, seda / sericina, glicerina de origen animal, ácido esteárico de origen animal, gelatina, manteca/grasa animal, leche/lactosa, ámbar gris.
+- Si la marca DECLARA "apta vegana" o "libre de ingredientes de origen animal" pero la lista incluye un ingrediente típicamente animal sin aclarar el origen, marcá la CONTRADICCIÓN: verdict "undetermined", confidence "medium", y explicá el conflicto en reason.
+- CRUELTY-FREE (no testeo en animales) es un claim DISTINTO de vegano. No los mezcles.
+- CERTIFICACIONES: SOLO las que la marca/etiqueta declara explícitamente (The Vegan Society, Leaping Bunny, PETA, etc.). NO inventes.`;
+
+const SCHEMA = `Respondé SOLO con un objeto JSON, sin markdown ni texto fuera del JSON:
+{"name":"...","verdict":"vegan"|"not_vegan"|"undetermined","confidence":"high"|"medium"|"low","reason":"frase breve en español","flagged_ingredients":["..."],"cruelty_free":"claimed"|"not_claimed"|"unknown","certifications":["..."],"source_url":"..."}`;
+
+function extractJson(text) {
+  let t = (text || "").replace(/```json/gi, "").replace(/```/g, "").trim();
+  const s = t.indexOf("{"), e = t.lastIndexOf("}");
+  if (s === -1 || e === -1) throw new Error("No se pudo leer la respuesta del análisis.");
+  return JSON.parse(t.slice(s, e + 1));
+}
+
+async function callAnthropic(key, payload) {
+  const r = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": key,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify(payload),
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error((data.error && data.error.message) || ("API error " + r.status));
+  return (data.content || []).filter(b => b.type === "text").map(b => b.text).join("\n");
+}
+
+const WEB_TOOLS = [{ type: "web_search_20250305", name: "web_search", max_uses: 3 }];
+
+export default async function handler(req, res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) return res.status(500).json({ error: "Falta ANTHROPIC_API_KEY en el servidor." });
+
+  try {
+    const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
+    const action = body.action;
+
+    // ---- DETECT: ¿producto único o catálogo? ----
+    if (action === "detect") {
+      const url = body.url;
+      const prompt =
+`Sos un analista de productos cosméticos. Usá web_search para visitar esta URL y entender qué es.
+URL: ${url}
+Determiná si es la página de UN solo producto o un catálogo/tienda con varios.
+Respondé SOLO JSON sin markdown:
+{"type":"single_product"|"catalog","brand":"nombre de la marca","products":[{"name":"...","url":"..."}]}
+single_product: products = 1 item con la URL dada.
+catalog: hasta 10 productos reales, con url si la encontrás (si no, "").`;
+      const txt = await callAnthropic(key, {
+        model: MODEL, max_tokens: 1500,
+        messages: [{ role: "user", content: prompt }], tools: WEB_TOOLS,
+      });
+      return res.status(200).json(extractJson(txt));
+    }
+
+    // ---- ANALYZE WEB ----
+    if (action === "analyze_web") {
+      const p = body.product || {};
+      const prompt =
+`Analizá si este producto cosmético es VEGANO. Usá web_search para encontrar la lista de ingredientes (INCI) y los claims oficiales.
+Producto: ${p.name || "(sin nombre)"} | URL: ${p.url || "(no disponible)"} | Marca: ${body.brand || "(desconocida)"} | Sitio: ${body.origin || ""}
+${RULES}
+- Si NO encontrás ingredientes publicados, verdict="undetermined", confidence="low", reason aclarando que la marca no publica composición.
+${SCHEMA}
+En source_url poné la URL donde encontraste el dato.`;
+      const txt = await callAnthropic(key, {
+        model: MODEL, max_tokens: 2000,
+        messages: [{ role: "user", content: prompt }], tools: WEB_TOOLS,
+      });
+      return res.status(200).json(extractJson(txt));
+    }
+
+    // ---- ANALYZE PHOTO ----
+    if (action === "analyze_photo") {
+      const prompt =
+`Te paso la foto de un producto cosmético (probablemente la etiqueta/dorso). Leé la lista de ingredientes (INCI) visible en la imagen y determiná si es VEGANO.
+${RULES}
+- Si la imagen no muestra ingredientes legibles, verdict="undetermined", confidence="low", y en reason aclará que no se ven ingredientes legibles.
+- Reportá cruelty_free y certificaciones SOLO si hay logos o claims visibles en la imagen.
+- En "name" poné el nombre del producto si se ve; si no, "Producto en la foto". source_url dejalo "".
+${SCHEMA}`;
+      const txt = await callAnthropic(key, {
+        model: MODEL, max_tokens: 2000,
+        messages: [{ role: "user", content: [
+          { type: "image", source: { type: "base64", media_type: body.mime || "image/jpeg", data: body.b64 } },
+          { type: "text", text: prompt },
+        ]}],
+      });
+      return res.status(200).json(extractJson(txt));
+    }
+
+    return res.status(400).json({ error: "Acción desconocida." });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Error interno." });
   }
-  *{box-sizing:border-box} body{margin:0}
-  body{font-family:var(--body);color:var(--ink);
-    background:radial-gradient(120% 80% at 100% 0%, rgba(169,192,162,.25), transparent 60%),
-      radial-gradient(100% 70% at 0% 100%, rgba(92,138,90,.12), transparent 55%),var(--cream);
-    min-height:100vh;padding:28px 18px 64px;}
-  .wrap{max-width:760px;margin:0 auto}
-  .kicker{font:600 12px/1 var(--body);letter-spacing:.18em;text-transform:uppercase;color:var(--leaf);margin:0 0 10px}
-  h1{font:500 40px/1 var(--display);margin:0;color:var(--forest);letter-spacing:-.5px}
-  .sub{color:var(--muted);margin:8px 0 0;font-size:15px;max-width:54ch}
-  .tabs{display:flex;gap:6px;margin-top:22px;background:#efe9da;border:1px solid var(--line);border-radius:12px;padding:5px;width:max-content}
-  .tab{font:600 14px var(--body);padding:9px 18px;border:none;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}
-  .tab.on{background:var(--paper);color:var(--forest);box-shadow:0 2px 8px -4px rgba(30,43,34,.4)}
-  .panel{background:var(--paper);border:1px solid var(--line);border-radius:16px;padding:18px;margin-top:14px;box-shadow:0 10px 30px -22px rgba(30,43,34,.5)}
-  .field{display:flex;gap:10px;flex-wrap:wrap}
-  input[type=url]{flex:1 1 220px;min-width:0;font-family:var(--body);font-size:15px;padding:13px 14px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--ink);outline:none}
-  input[type=url]:focus{border-color:var(--leaf);box-shadow:0 0 0 3px rgba(92,138,90,.15)}
-  button.go{font:600 15px var(--body);padding:13px 22px;border:none;border-radius:10px;background:var(--forest);color:#F6F1E7;cursor:pointer;transition:.15s}
-  button.go:hover{background:var(--leaf)} button.go:disabled{opacity:.5;cursor:not-allowed}
-  .drop{border:1.5px dashed var(--sage);border-radius:12px;padding:26px 16px;text-align:center;cursor:pointer;background:#fbf8f1;transition:.15s}
-  .drop:hover{border-color:var(--leaf);background:#f4f7f1}
-  .drop p{margin:0;color:var(--forest);font-weight:600;font-size:15px}
-  .drop small{display:block;color:var(--muted);margin-top:6px;font-size:13px}
-  .thumbs{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
-  .thumb{position:relative;width:62px;height:62px;border-radius:8px;overflow:hidden;border:1px solid var(--line)}
-  .thumb img{width:100%;height:100%;object-fit:cover}
-  .thumb b{position:absolute;top:2px;right:2px;background:var(--terra);color:#fff;width:16px;height:16px;border-radius:50%;font:700 11px var(--body);line-height:16px;text-align:center;cursor:pointer}
-  .hint{font-size:12.5px;color:var(--muted);margin:12px 2px 0}
-  .actions{margin-top:14px}
-  .status{margin-top:18px;display:none} .status.on{display:block}
-  .bar{height:6px;background:var(--line);border-radius:999px;overflow:hidden}
-  .bar>i{display:block;height:100%;width:0;background:var(--leaf);transition:width .3s}
-  .status .lbl{font-size:13.5px;color:var(--forest);margin:0 0 8px;display:flex;align-items:center;gap:8px}
-  .spin{width:14px;height:14px;border:2px solid var(--sage);border-top-color:var(--forest);border-radius:50%;animation:sp .7s linear infinite}
-  @keyframes sp{to{transform:rotate(360deg)}}
-  .err{margin-top:16px;background:#fdf0ec;border:1px solid #e8c4b8;color:#7a3322;padding:12px 14px;border-radius:10px;font-size:14px;display:none;line-height:1.5}
-  .err.on{display:block}
-  .summary{margin-top:26px;display:none} .summary.on{display:block}
-  .summary h2{font:500 24px var(--display);color:var(--forest);margin:0 0 4px}
-  .summary .meta{font-size:13px;color:var(--muted);margin:0 0 16px}
-  .card{background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px;opacity:0;transform:translateY(8px);animation:rise .4s forwards;display:flex;gap:14px}
-  @keyframes rise{to{opacity:1;transform:none}}
-  .card .pic{flex:0 0 64px;height:64px;border-radius:8px;overflow:hidden;border:1px solid var(--line);background:#eee}
-  .card .pic img{width:100%;height:100%;object-fit:cover}
-  .card .bd{flex:1;min-width:0}
-  .card .top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
-  .card .pname{font:600 17px var(--body);color:var(--ink);margin:0;line-height:1.3}
-  .badge{font:700 11.5px var(--body);letter-spacing:.06em;text-transform:uppercase;padding:6px 11px;border-radius:999px;white-space:nowrap}
-  .b-vegan{background:#e6f0e3;color:#2c5a2c} .b-not{background:#f7e3dc;color:#8c3a26}
-  .b-und{background:#f6ecd5;color:#8a6113} .b-err{background:#eee;color:#666}
-  .conf{font-size:12px;color:var(--muted);margin:8px 0 0} .conf b{color:var(--forest);font-weight:600}
-  .reason{font-size:14px;color:#3a463a;margin:10px 0 0;line-height:1.5}
-  .rows{margin:12px 0 0;border-top:1px solid var(--line);padding-top:12px;display:grid;gap:9px}
-  .row{display:flex;gap:10px;font-size:13.5px;align-items:baseline}
-  .row .k{flex:0 0 122px;color:var(--muted);font-weight:500} .row .v{flex:1;color:var(--ink)}
-  .chip{display:inline-block;background:#f3eede;border:1px solid var(--line);border-radius:6px;padding:2px 8px;margin:0 5px 5px 0;font-size:12.5px}
-  .chip.bad{background:#f7e3dc;border-color:#e8c4b8;color:#8c3a26}
-  .chip.good{background:#e6f0e3;border-color:#cfe0c8;color:#2c5a2c}
-  .src{font-size:12px;margin-top:10px} .src a{color:var(--leaf);text-decoration:none}
-  .src a:hover{text-decoration:underline}
-  .foot{margin-top:30px;font-size:11.5px;color:var(--muted);line-height:1.6;border-top:1px solid var(--line);padding-top:14px}
-  .hide{display:none}
-</style>
-</head>
-<body>
-<div class="wrap">
-  <div class="head">
-    <p class="kicker">Aviva Veganos</p>
-    <h1>¿Es realmente vegano?</h1>
-    <p class="sub">Sacá una foto de la etiqueta del producto (más confiable) o pegá la URL de una web. Revisa ingredientes y claims, y arma el informe.</p>
-  </div>
-
-  <div class="tabs">
-    <button class="tab on" data-mode="photo" id="tPhoto">Por foto</button>
-    <button class="tab" data-mode="web" id="tWeb">Por web</button>
-  </div>
-
-  <div class="panel" id="panelPhoto">
-    <div class="drop" id="drop">
-      <p>Sacá o subí una foto</p>
-      <small>Enfocá la lista de ingredientes del dorso. Podés cargar varias.</small>
-    </div>
-    <input type="file" id="file" accept="image/*" multiple class="hide" />
-    <div class="thumbs" id="thumbs"></div>
-    <div class="actions"><button class="go" id="goPhoto" disabled>Analizar fotos</button></div>
-    <p class="hint">La foto de la etiqueta es la fuente de verdad: lee los ingredientes impresos, no la web.</p>
-  </div>
-
-  <div class="panel hide" id="panelWeb">
-    <div class="field">
-      <input id="url" type="url" placeholder="https://semillacosmeticos.com.ar" autocomplete="off" />
-      <button class="go" id="goWeb">Analizar web</button>
-    </div>
-    <p class="hint">Si es una página de producto, analiza ese. Si es un catálogo, hasta 10 productos. El informe vale lo que la marca publica.</p>
-  </div>
-
-  <div class="status" id="status">
-    <p class="lbl"><span class="spin"></span><span id="statusText">Procesando…</span></p>
-    <div class="bar"><i id="barFill"></i></div>
-  </div>
-  <div class="err" id="err"></div>
-
-  <div class="summary" id="summary">
-    <h2 id="sumTitle"></h2>
-    <p class="meta" id="sumMeta"></p>
-    <div id="cards"></div>
-  </div>
-
-  <p class="foot">El veredicto depende de la info disponible. Sin lista de ingredientes legible, el producto queda como <b>No determinable</b> — no se asume veganismo. <b>Vegano</b> (sin ingredientes de origen animal) y <b>cruelty-free</b> (sin testeo en animales) son cosas distintas y se reportan por separado. Las certificaciones listadas son solo las que la marca/etiqueta declara.</p>
-</div>
-
-<script>
-const API_URL = "/api/analyze";   // mismo dominio que el deploy de Vercel
-const MAX_PRODUCTS = 10;
-const $ = id => document.getElementById(id);
-const els = {
-  status:$('status'), statusText:$('statusText'), barFill:$('barFill'), err:$('err'),
-  summary:$('summary'), sumTitle:$('sumTitle'), sumMeta:$('sumMeta'), cards:$('cards'),
-};
-let photos = []; // {dataUrl, b64, mime}
-
-/* tabs */
-function setMode(m){
-  $('tPhoto').classList.toggle('on', m==='photo');
-  $('tWeb').classList.toggle('on', m==='web');
-  $('panelPhoto').classList.toggle('hide', m!=='photo');
-  $('panelWeb').classList.toggle('hide', m!=='web');
-  clearErr();
 }
-$('tPhoto').onclick = ()=>setMode('photo');
-$('tWeb').onclick = ()=>setMode('web');
-
-/* ui */
-function setStatus(t,p){ els.status.classList.add('on'); els.statusText.textContent=t; if(typeof p==='number') els.barFill.style.width=p+'%'; }
-function clearStatus(){ els.status.classList.remove('on'); els.barFill.style.width='0'; }
-function showErr(msg){ els.err.innerHTML=msg; els.err.classList.add('on'); }
-function clearErr(){ els.err.classList.remove('on'); els.err.innerHTML=''; }
-function esc(s){ return String(s).replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m])); }
-
-/* backend call */
-async function callBackend(payload){
-  const r = await fetch(API_URL, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload) });
-  let data; try{ data = await r.json(); }catch(_){ throw new Error("Respuesta inválida del servidor."); }
-  if(!r.ok) throw new Error(data.error || ("Error "+r.status));
-  return data;
-}
-function netHint(e){
-  const m=(e&&e.message)||'';
-  if(/Failed to fetch|NetworkError|Load failed/i.test(m))
-    return "No se pudo contactar el backend. Verificá que el deploy esté activo y que la URL del endpoint sea correcta.";
-  if(/ANTHROPIC_API_KEY/i.test(m))
-    return "Falta la API key en el servidor. Configurá ANTHROPIC_API_KEY en las variables de entorno de Vercel.";
-  return m || "Algo falló. Probá de nuevo.";
-}
-
-/* photo: downscale before sending */
-function readDataUrl(file){ return new Promise((res,rej)=>{const fr=new FileReader();fr.onload=()=>res(fr.result);fr.onerror=()=>rej(new Error('read'));fr.readAsDataURL(file);}); }
-function loadImg(src){ return new Promise((res,rej)=>{const i=new Image();i.onload=()=>res(i);i.onerror=()=>rej(new Error('img'));i.src=src;}); }
-async function scaleFile(file, maxEdge){
-  const url = await readDataUrl(file);
-  try{
-    const img = await loadImg(url);
-    const scale = Math.min(1, maxEdge/Math.max(img.width,img.height));
-    const cw=Math.round(img.width*scale), ch=Math.round(img.height*scale);
-    const c=document.createElement('canvas'); c.width=cw; c.height=ch;
-    c.getContext('2d').drawImage(img,0,0,cw,ch);
-    const out=c.toDataURL('image/jpeg',0.85);
-    return { dataUrl:out, b64:out.split(',')[1], mime:'image/jpeg' };
-  }catch(_){ return { dataUrl:url, b64:url.split(',')[1], mime:file.type||'image/jpeg' }; }
-}
-$('drop').onclick = ()=>$('file').click();
-$('file').onchange = async (ev)=>{
-  for(const f of ev.target.files){ if(!f.type.startsWith('image/')) continue; photos.push(await scaleFile(f,1600)); }
-  ev.target.value=''; renderThumbs();
-};
-function renderThumbs(){
-  $('thumbs').innerHTML = photos.map((p,i)=>`<div class="thumb"><img src="${p.dataUrl}"><b data-i="${i}">×</b></div>`).join('');
-  $('thumbs').querySelectorAll('b').forEach(b=>b.onclick=()=>{ photos.splice(+b.dataset.i,1); renderThumbs(); });
-  $('goPhoto').disabled = photos.length===0;
-}
-$('goPhoto').onclick = async ()=>{
-  clearErr(); els.summary.classList.remove('on'); els.cards.innerHTML='';
-  if(!photos.length) return;
-  $('goPhoto').disabled = true;
-  try{
-    els.sumTitle.textContent='Análisis por foto'; els.sumMeta.textContent=photos.length+' foto(s)';
-    els.summary.classList.add('on');
-    for(let i=0;i<photos.length;i++){
-      setStatus(`Leyendo foto ${i+1} de ${photos.length}…`, 10+Math.round((i/photos.length)*85));
-      try{
-        const r = await callBackend({ action:'analyze_photo', b64:photos[i].b64, mime:photos[i].mime });
-        renderCard(r, i, photos[i].dataUrl);
-      }catch(e){
-        if(/Failed to fetch|NetworkError|ANTHROPIC/i.test(e.message)) throw e;
-        renderCard({name:'Foto '+(i+1),verdict:'err',reason:'No se pudo leer esta foto. Probá con más luz o enfoque.',flagged_ingredients:[],cruelty_free:'unknown',certifications:[]}, i, photos[i].dataUrl);
-      }
-    }
-    setStatus('Listo',100); setTimeout(clearStatus,600);
-  }catch(e){ clearStatus(); showErr(netHint(e)); }
-  finally{ $('goPhoto').disabled=false; }
-};
-
-/* web */
-function originOf(u){ try{ return new URL(u).origin; }catch(_){ return u; } }
-$('goWeb').onclick = async ()=>{
-  const url=$('url').value.trim();
-  clearErr(); els.summary.classList.remove('on'); els.cards.innerHTML='';
-  if(!/^https?:\/\//i.test(url)){ showErr("Pegá una URL válida que empiece con http:// o https://"); return; }
-  $('goWeb').disabled = true;
-  try{
-    setStatus("Detectando tipo de página…", 8);
-    const det = await callBackend({ action:'detect', url });
-    let products = Array.isArray(det.products)? det.products.filter(p=>p&&p.name):[];
-    if(!products.length) products=[{name:det.brand||url,url}];
-    const capped = products.slice(0,MAX_PRODUCTS);
-    const origin = originOf(url);
-    els.sumTitle.textContent = det.type==='catalog' ? `${det.brand||'Marca'} — catálogo` : (det.brand||'Producto')+' — análisis';
-    els.sumMeta.textContent = det.type==='catalog'
-      ? `${capped.length} producto(s)`+(products.length>MAX_PRODUCTS?` · se encontraron ${products.length}, se analizaron los primeros ${MAX_PRODUCTS}`:'')
-      : 'Producto individual';
-    els.summary.classList.add('on');
-    for(let i=0;i<capped.length;i++){
-      setStatus(`Analizando ${i+1} de ${capped.length}: ${capped[i].name}`, 15+Math.round((i/capped.length)*80));
-      try{ renderCard(await callBackend({ action:'analyze_web', product:capped[i], brand:det.brand, origin }), i); }
-      catch(e){ if(/Failed to fetch|NetworkError|ANTHROPIC/i.test(e.message)) throw e;
-        renderCard({name:capped[i].name,verdict:'err',reason:'No se pudo completar el análisis.',flagged_ingredients:[],cruelty_free:'unknown',certifications:[]}, i); }
-    }
-    setStatus("Listo",100); setTimeout(clearStatus,600);
-  }catch(e){ clearStatus(); showErr(netHint(e)); }
-  finally{ $('goWeb').disabled=false; }
-};
-
-/* render */
-const VERDICT={vegan:{cls:'b-vegan',label:'Vegano'},not_vegan:{cls:'b-not',label:'No vegano'},undetermined:{cls:'b-und',label:'No determinable'}};
-const CF={claimed:'La marca lo declara',not_claimed:'No lo declara',unknown:'Sin datos'};
-function renderCard(r,i,thumb){
-  const v=VERDICT[r.verdict]||{cls:'b-err',label:'Sin resultado'};
-  const flagged=(r.flagged_ingredients||[]).length?r.flagged_ingredients.map(x=>`<span class="chip bad">${esc(x)}</span>`).join(''):'<span style="color:var(--muted);font-size:13px">Ninguno detectado</span>';
-  const certs=(r.certifications||[]).length?r.certifications.map(x=>`<span class="chip good">${esc(x)}</span>`).join(''):'<span style="color:var(--muted);font-size:13px">Ninguna declarada</span>';
-  const src=r.source_url?`<div class="src"><a href="${esc(r.source_url)}" target="_blank" rel="noopener">Fuente del dato ↗</a></div>`:'';
-  const pic=thumb?`<div class="pic"><img src="${thumb}"></div>`:'';
-  const c=document.createElement('div'); c.className='card'; c.style.animationDelay=(i*70)+'ms';
-  c.innerHTML=`${pic}<div class="bd">
-    <div class="top"><p class="pname">${esc(r.name||'Producto')}</p><span class="badge ${v.cls}">${v.label}</span></div>
-    <p class="conf">Confianza: <b>${({high:'Alta',medium:'Media',low:'Baja'})[r.confidence]||'—'}</b></p>
-    ${r.reason?`<p class="reason">${esc(r.reason)}</p>`:''}
-    <div class="rows">
-      <div class="row"><span class="k">Ingredientes flag</span><span class="v">${flagged}</span></div>
-      <div class="row"><span class="k">Cruelty-free</span><span class="v">${CF[r.cruelty_free]||'Sin datos'}</span></div>
-      <div class="row"><span class="k">Certificaciones</span><span class="v">${certs}</span></div>
-    </div>${src}</div>`;
-  els.cards.appendChild(c);
-}
-</script>
-</body>
-</html>
