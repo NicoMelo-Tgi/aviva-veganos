@@ -35,7 +35,7 @@ async function callAnthropic(key, payload) {
   return (data.content || []).filter(b => b.type === "text").map(b => b.text).join("\n");
 }
 
-const WEB_TOOLS = [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }];
+const WEB_TOOLS = [{ type: "web_search_20250305", name: "web_search", max_uses: 3 }];
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
