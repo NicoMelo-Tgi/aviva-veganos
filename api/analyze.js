@@ -18,7 +18,8 @@ const RULES = `Reglas estrictas:
 - En "brand" devolvé el nombre de la marca (no del producto).`;
 
 const SCHEMA = `Respondé SOLO con un objeto JSON, sin markdown ni texto fuera del JSON:
-{"name":"...","brand":"...","verdict":"vegan"|"not_vegan"|"undetermined","confidence":"high"|"medium"|"low","reason":"frase breve en español","flagged_ingredients":["..."],"cruelty_free":"certified"|"claimed"|"not_claimed"|"unknown","certifications":["..."],"source_url":"..."}`;
+{"name":"...","brand":"...","verdict":"vegan"|"not_vegan"|"undetermined","confidence":"high"|"medium"|"low","reason":"frase breve en español","flagged_ingredients":["..."],"cruelty_free":"certified"|"claimed"|"not_claimed"|"unknown","certifications":["..."],"source_url":"..."}
+Los valores de texto (reason, name, etc.) van en TEXTO PLANO: sin etiquetas <cite>, sin HTML, sin markdown, sin comillas internas raras.`;
 
 // Seed de marcas certificadas cruelty-free tomado de la lista de Te Protejo (ongteprotejo.org).
 // PARCIAL — refrescar contra la lista oficial. Da un match instantáneo y confiable sin gastar búsquedas.
@@ -64,6 +65,20 @@ function applyCrueltyFree(result){
     if(!result.source_url) result.source_url = m.url;
   }
   return result;
+}
+
+function stripCites(s){
+  return typeof s === "string"
+    ? s.replace(/<\/?cite[^>]*>/gi, "").replace(/<[^>]+>/g, "").replace(/\s{2,}/g, " ").trim()
+    : s;
+}
+function cleanResult(r){
+  if(!r || typeof r !== "object") return r;
+  ["name","brand","reason","source_url"].forEach(k => { if(r[k]) r[k] = stripCites(r[k]); });
+  if(Array.isArray(r.flagged_ingredients)) r.flagged_ingredients = r.flagged_ingredients.map(stripCites);
+  if(Array.isArray(r.certifications)) r.certifications = r.certifications.map(stripCites);
+  if(Array.isArray(r.products)) r.products = r.products.map(p => p && typeof p === "object" ? { ...p, name: stripCites(p.name), url: stripCites(p.url) } : p);
+  return r;
 }
 
 function extractJson(text) {
@@ -119,7 +134,7 @@ catalog: hasta 10 productos reales, con url si la encontrás (si no, "").`;
         model: MODEL, max_tokens: 1500,
         messages: [{ role: "user", content: prompt }], tools: WEB_TOOLS,
       });
-      return res.status(200).json(extractJson(txt));
+      return res.status(200).json(cleanResult(extractJson(txt)));
     }
 
     // ---- ANALYZE WEB ----
@@ -136,7 +151,7 @@ En source_url poné la URL donde encontraste el dato.`;
         model: MODEL, max_tokens: 2000,
         messages: [{ role: "user", content: prompt }], tools: WEB_TOOLS,
       });
-      return res.status(200).json(applyCrueltyFree(extractJson(txt)));
+      return res.status(200).json(cleanResult(applyCrueltyFree(extractJson(txt))));
     }
 
     // ---- ANALYZE PHOTO ----
@@ -157,7 +172,7 @@ ${SCHEMA}`;
         ]}],
         tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 3 }],
       });
-      return res.status(200).json(applyCrueltyFree(extractJson(txt)));
+      return res.status(200).json(cleanResult(applyCrueltyFree(extractJson(txt))));
     }
 
     return res.status(400).json({ error: "Acción desconocida." });
