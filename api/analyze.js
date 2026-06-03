@@ -8,12 +8,13 @@ const RULES = `Reglas estrictas:
 - VEGANO = sin ingredientes de origen animal. Flagueá si aparece: carmín / CI 75470 / ácido carmínico, lanolina, cera de abeja (cera alba / beeswax), miel (mel), propóleo, colágeno animal, keratina/keratin (salvo que aclare "vegetal"), elastina, escualeno/escualano de origen animal, goma laca / shellac, seda / sericina, glicerina de origen animal, ácido esteárico de origen animal, gelatina, manteca/grasa animal, leche/lactosa, ámbar gris.
 - Si la marca DECLARA "apta vegana" o "libre de ingredientes de origen animal" pero la lista incluye un ingrediente típicamente animal sin aclarar el origen, marcá la CONTRADICCIÓN: verdict "undetermined", confidence "medium", y explicá el conflicto en reason.
 - CRUELTY-FREE (no testeo en animales) es DISTINTO de vegano y es PRIORITARIO. No los mezcles: una marca puede ser cruelty-free sin ser vegana, y viceversa.
-- Para cruelty-free, determiná si la MARCA está CERTIFICADA. Fuente principal: la lista de Te Protejo (https://ongteprotejo.org/ar/marcas-cruelty-free) y los sellos que reconoce: Te Protejo, Leaping Bunny, PETA, BDIH, NATRUE.
-  · Si la marca figura en Te Protejo o tiene uno de esos sellos → cruelty_free="certified", agregá el sello (ej. "Te Protejo", "Leaping Bunny", "PETA") a certifications, y poné en source_url el link de Te Protejo de esa marca si lo tenés.
-  · Si la marca solo lo declara sin sello de tercero → "claimed".
-  · Si hay indicios de que SÍ testea (o pertenece a grupo que testea donde lo exige la ley) → "not_claimed".
-  · Sin información → "unknown".
-- CERTIFICACIONES VEGANAS: SOLO las que la marca/etiqueta declara explícitamente (The Vegan Society, etc.). NO inventes.
+- Para cruelty-free, determiná si la MARCA está CERTIFICADA. Fuentes (consultá con web_search): Te Protejo (https://ongteprotejo.org/ar/marcas-cruelty-free), base de PETA (https://crueltyfree.peta.org y https://www.petalatino.com) y los sellos Te Protejo, Leaping Bunny, PETA, BDIH, NATRUE.
+  · Si la marca figura en esas fuentes o tiene uno de esos sellos → cruelty_free="certified", agregá el sello a certifications y poné el link como source_url si lo tenés.
+  · Si solo lo declara sin sello de tercero → "claimed". · Si hay indicios de que SÍ testea o pertenece a grupo que testea donde lo exige la ley → "not_claimed". · Sin info → "unknown".
+- IMPORTANTE: el estado cruelty-free CAMBIA (compra de la marca por grupos grandes, ingreso a mercados que exigen testeo como China). NO afirmes "certified" de memoria: verificá el estado ACTUAL en una fuente. Ante duda reciente, usá "claimed" y aclaralo en reason.
+- Marcas frecuentemente listadas como cruelty-free (úsalas como INDICIO, igual verificá estado actual): Kat Von D/KVD, Too Faced, Tarte, Anastasia Beverly Hills, Urban Decay, Marc Jacobs Beauty, Becca, IT Cosmetics, NYX, ColourPop, Makeup Geek, Jordana, e.l.f., Wet n Wild, Milani, Hard Candy, Cover FX, Sugar Pill, MUA, Ardell, Pixi, The Balm, BH Cosmetics, Lime Crime, OCC, Smashbox, Kylie Cosmetics, KKW Beauty, Stila, Fenty Beauty, Jeffree Star, Milk Makeup, The Body Shop, Lush, Makeup Revolution, ArtDeco, Flower Beauty, Annabelle, Femme Fatale, Le Métier de Beauté, Huda Beauty.
+- CERTIFICACIÓN VEGANA: si el producto/marca tiene sello V-Label (verificá en https://www.v-label.com/arg) o figura en Unión Vegana (unionvegana.org), Veg Argentina (vegargentina.com) o Guía Vegana (guiavegana.ar), es una certificación vegana fuerte → agregala a certifications y úsala para subir la confianza del verdict vegano.
+- Otras CERTIFICACIONES VEGANAS declaradas (The Vegan Society, etc.): inclúilas si están. NO inventes.
 - En "brand" devolvé el nombre de la marca (no del producto).`;
 
 const SCHEMA = `Respondé SOLO con un objeto JSON, sin markdown ni texto fuera del JSON:
@@ -154,7 +155,7 @@ ${SCHEMA}`;
           { type: "image", source: { type: "base64", media_type: body.mime || "image/jpeg", data: body.b64 } },
           { type: "text", text: prompt },
         ]}],
-        tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 2 }],
+        tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 3 }],
       });
       return res.status(200).json(applyCrueltyFree(extractJson(txt)));
     }
