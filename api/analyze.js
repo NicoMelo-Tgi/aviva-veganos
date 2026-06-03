@@ -18,8 +18,8 @@ const RULES = `Reglas estrictas:
 - En "brand" devolvé el nombre de la marca (no del producto).`;
 
 const SCHEMA = `Respondé SOLO con un objeto JSON, sin markdown ni texto fuera del JSON:
-{"name":"...","brand":"...","verdict":"vegan"|"not_vegan"|"undetermined","confidence":"high"|"medium"|"low","reason":"frase breve en español","flagged_ingredients":["..."],"cruelty_free":"certified"|"claimed"|"not_claimed"|"unknown","certifications":["..."],"source_url":"..."}
-Los valores de texto (reason, name, etc.) van en TEXTO PLANO: sin etiquetas <cite>, sin HTML, sin markdown, sin comillas internas raras.`;
+{"name":"...","brand":"...","verdict":"vegan"|"not_vegan"|"undetermined","confidence":"high"|"medium"|"low","reason":"frase breve en español","ingredients":["lista INCI completa, un ítem por ingrediente"],"flagged_ingredients":["..."],"cruelty_free":"certified"|"claimed"|"not_claimed"|"unknown","certifications":["..."],"source_url":"..."}
+En "ingredients" devolvé la lista INCI COMPLETA que hayas podido leer (array vacío si no la ves). Los valores de texto van en TEXTO PLANO: sin <cite>, sin HTML, sin markdown.`;
 
 // Seed de marcas certificadas cruelty-free tomado de la lista de Te Protejo (ongteprotejo.org).
 // PARCIAL — refrescar contra la lista oficial. Da un match instantáneo y confiable sin gastar búsquedas.
@@ -64,6 +64,72 @@ function applyCrueltyFree(result){
     if(!result.certifications.some(c => norm(c).includes(norm(m.cert)))) result.certifications.push(label);
     if(!result.source_url) result.source_url = m.url;
   }
+  return result;
+}
+
+// ---- Lista de vigilancia de disruptores endócrinos ----
+// Base: lista prioritaria de la UE (Reg. 1223/2009, 28 sustancias) + ftalatos ya prohibidos en cosmética UE.
+// Es INFORMATIVA ("potencial" / "en evaluación"), NO un veredicto de toxicidad.
+const SRC_UE = "Lista prioritaria UE de disruptores endócrinos (Reg. 1223/2009)";
+const WATCH_DEFS = [
+  [["butylparaben"], "estrogénico", "alta", "clasificado SVHC en REACH (UE)"],
+  [["isobutylparaben","isopropylparaben"], "estrogénico", "alta", "prohibido en cosmética UE"],
+  [["propylparaben"], "estrogénico", "media", "lista prioritaria UE"],
+  [["methylparaben"], "estrogénico débil", "baja", "SCCS: seguro hasta 0,4%"],
+  [["ethylparaben"], "estrogénico débil", "baja", ""],
+  [["dibutyl phthalate","dbp"], "antiandrogénico / reprotóxico", "alta", "prohibido en cosmética UE (CMR)"],
+  [["diethylhexyl phthalate","dehp"], "antiandrogénico / reprotóxico", "alta", "prohibido en cosmética UE (CMR)"],
+  [["butyl benzyl phthalate","bbp"], "antiandrogénico", "alta", "prohibido en cosmética UE"],
+  [["diethyl phthalate","dep"], "antiandrogénico (señalado)", "media", "permitido; suele ir dentro de Parfum"],
+  [["benzophenone 3","oxybenzone"], "estrogénico", "media", "lista prioritaria UE; con límites de concentración"],
+  [["benzophenone 1"], "estrogénico", "media", "lista prioritaria UE"],
+  [["benzophenone 2"], "estrogénico / tiroideo", "media", "SCCS 2025: no pudo establecer seguridad"],
+  [["benzophenone 4"], "estrogénico", "media", "lista prioritaria UE"],
+  [["benzophenone 5"], "estrogénico", "baja", "SCCS 2025: seguro a cierta concentración"],
+  [["benzophenone"], "estrogénico", "media", "lista prioritaria UE"],
+  [["ethylhexyl methoxycinnamate","octinoxate","octyl methoxycinnamate"], "estrogénico / tiroideo", "media", "SCCS: seguro a cierta concentración"],
+  [["homosalate"], "hormonal", "media", "SCCS limitó la concentración"],
+  [["octocrylene"], "hormonal (señalado)", "media", "lista prioritaria UE"],
+  [["4 methylbenzylidene camphor","enzacamene"], "estrogénico / tiroideo", "media", "lista prioritaria UE"],
+  [["triclosan"], "tiroideo / estrogénico", "media", "restringido en UE"],
+  [["triclocarban"], "hormonal", "media", "lista prioritaria UE"],
+  [["butylated hydroxyanisole","bha"], "estrogénico (señalado)", "media", "lista prioritaria UE"],
+  [["butylated hydroxytoluene","bht"], "hormonal (señalado)", "baja", "lista prioritaria UE"],
+  [["resorcinol"], "tiroideo", "media", "lista prioritaria UE (tinturas)"],
+  [["kojic acid"], "hormonal (señalado)", "baja", "lista prioritaria UE"],
+  [["cyclotetrasiloxane","d4"], "reproductivo", "media", "restringido en UE (CMR/ED)"],
+  [["cyclopentasiloxane","d5"], "en evaluación", "baja", "lista prioritaria UE"],
+  [["cyclomethicone"], "en evaluación", "baja", "lista prioritaria UE"],
+  [["genistein"], "estrogénico (fitoestrógeno)", "media", "lista prioritaria UE"],
+  [["daidzein"], "estrogénico (fitoestrógeno)", "media", "lista prioritaria UE"],
+  [["triphenyl phosphate","tphp"], "hormonal (señalado)", "media", "frecuente en esmaltes"],
+  [["butylphenyl methylpropional","lilial","bmhca"], "reprotóxico", "alta", "prohibido en cosmética UE (2022)"],
+  [["benzyl salicylate"], "señalado", "baja", "lista prioritaria UE"],
+  [["salicylic acid"], "señalado por UE (muy común, baja preocupación a conc. cosméticas)", "baja", "lista prioritaria UE"],
+];
+const WATCH = {};
+for (const [names, concern, evidence, note] of WATCH_DEFS) {
+  for (const n of names) WATCH[norm(n)] = { concern, evidence, note, source: SRC_UE };
+}
+const EV_ORDER = { alta: 0, media: 1, baja: 2 };
+function applyWatchList(result) {
+  const ing = Array.isArray(result && result.ingredients) ? result.ingredients : [];
+  const hits = [], seen = new Set();
+  let fragrance = false;
+  for (const raw of ing) {
+    const n = norm(raw);
+    if (!n) continue;
+    if (/\b(parfum|fragrance|aroma)\b/.test(n)) fragrance = true;
+    let def = WATCH[n];
+    if (!def) { for (const key in WATCH) { if (key.length >= 4 && n.includes(key)) { def = WATCH[key]; break; } } }
+    if (def && !seen.has(def.concern + n)) {
+      seen.add(def.concern + n);
+      hits.push({ name: stripCites(raw), concern: def.concern, evidence: def.evidence, note: def.note, source: def.source });
+    }
+  }
+  hits.sort((a, b) => (EV_ORDER[a.evidence] ?? 9) - (EV_ORDER[b.evidence] ?? 9));
+  result.watch_ingredients = hits;
+  result.fragrance_flag = fragrance;
   return result;
 }
 
@@ -148,10 +214,10 @@ ${RULES}
 ${SCHEMA}
 En source_url poné la URL donde encontraste el dato.`;
       const txt = await callAnthropic(key, {
-        model: MODEL, max_tokens: 2000,
+        model: MODEL, max_tokens: 2600,
         messages: [{ role: "user", content: prompt }], tools: WEB_TOOLS,
       });
-      return res.status(200).json(cleanResult(applyCrueltyFree(extractJson(txt))));
+      return res.status(200).json(cleanResult(applyWatchList(applyCrueltyFree(extractJson(txt)))));
     }
 
     // ---- ANALYZE PHOTO ----
@@ -165,14 +231,14 @@ ${RULES}
 - En "name" poné el nombre del producto si se ve; si no, "Producto en la foto".
 ${SCHEMA}`;
       const txt = await callAnthropic(key, {
-        model: MODEL, max_tokens: 2000,
+        model: MODEL, max_tokens: 2600,
         messages: [{ role: "user", content: [
           { type: "image", source: { type: "base64", media_type: body.mime || "image/jpeg", data: body.b64 } },
           { type: "text", text: prompt },
         ]}],
         tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 3 }],
       });
-      return res.status(200).json(cleanResult(applyCrueltyFree(extractJson(txt))));
+      return res.status(200).json(cleanResult(applyWatchList(applyCrueltyFree(extractJson(txt)))));
     }
 
     return res.status(400).json({ error: "Acción desconocida." });
