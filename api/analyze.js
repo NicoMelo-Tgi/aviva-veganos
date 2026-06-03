@@ -192,6 +192,8 @@ export default async function handler(req, res) {
 `Sos un analista de productos cosméticos. Usá web_search para visitar esta URL y entender qué es.
 URL: ${url}
 Determiná si es la página de UN solo producto o un catálogo/tienda con varios.
+- Si la URL apunta a un PRODUCTO ESPECÍFICO (el path incluye el nombre de un producto, /product(s)/, /p/, o es una ficha individual como las de incidecoder/skinsort), es "single_product" — AUNQUE la página muestre otros productos de la marca alrededor.
+- Solo es "catalog" si la URL es una página de listado / tienda / categoría sin un producto principal.
 Respondé SOLO JSON sin markdown:
 {"type":"single_product"|"catalog","brand":"nombre de la marca","products":[{"name":"...","url":"..."}]}
 single_product: products = 1 item con la URL dada.
@@ -209,6 +211,7 @@ catalog: hasta 10 productos reales, con url si la encontrás (si no, "").`;
       const prompt =
 `Analizá si este producto cosmético es VEGANO. Usá web_search para encontrar la lista de ingredientes (INCI) y los claims oficiales.
 Producto: ${p.name || "(sin nombre)"} | URL: ${p.url || "(no disponible)"} | Marca: ${body.brand || "(desconocida)"} | Sitio: ${body.origin || ""}
+PRIORIDAD: leé el INCI publicado en la URL dada. Si la URL es de una base de ingredientes (incidecoder, skinsort, etc.), extraé el INCI de ahí directamente. Solo si esa página no lo trae, buscá en otra fuente.
 ${RULES}
 - Si NO encontrás ingredientes publicados, verdict="undetermined", confidence="low", reason aclarando que la marca no publica composición.
 ${SCHEMA}
